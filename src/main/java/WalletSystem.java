@@ -1,0 +1,111 @@
+import net.dv8tion.jda.api.EmbedBuilder;
+import net.dv8tion.jda.api.entities.Member;
+import net.dv8tion.jda.api.entities.User;
+import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
+import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent;
+import net.dv8tion.jda.api.events.interaction.ModalInteractionEvent;
+import net.dv8tion.jda.api.hooks.ListenerAdapter;
+import net.dv8tion.jda.api.interactions.components.ActionRow;
+import net.dv8tion.jda.api.interactions.components.buttons.Button;
+import net.dv8tion.jda.api.interactions.components.text.TextInput;
+import net.dv8tion.jda.api.interactions.components.text.TextInputStyle;
+import net.dv8tion.jda.api.interactions.modals.Modal;
+
+import java.awt.Color;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
+
+public class WalletSystem extends ListenerAdapter {
+
+    @Override
+    public void onSlashCommandInteraction(SlashCommandInteractionEvent event) {
+        if (event.getName().equals("wallet")) {
+            UserData data = Database.getUserData(event.getUser().getId());
+            event.replyEmbeds(buildCleanEmbed(event.getUser(), data).build()).setEphemeral(true)
+                    .addActionRow(Button.secondary("redeem_code", "Redeem Code"), Button.success("claim_rakeback", "Claim Rakeback")).queue();
+        } else if (event.getName().equals("getwallet")) {
+            Member target = event.getOption("user").getAsMember();
+            if (target == null) return;
+            UserData data = Database.getUserData(target.getId());
+            event.replyEmbeds(buildAdminSecurityEmbed(target, data).build()).setEphemeral(true)
+                    .addActionRow(Button.primary("admin_credit_" + target.getId(), "Credit"), Button.danger("admin_debit_" + target.getId(), "Debit")).queue();
+        }
+    }
+
+    @Override
+    public void onButtonInteraction(ButtonInteractionEvent event) {
+        String id = event.getComponentId();
+        if (id.startsWith("admin_")) {
+            String type = id.contains("credit") ? "Credit" : "Debit";
+            event.replyModal(Modal.create("modal_admin_" + type + "_" + id.split("_")[2], type)
+                    .addActionRows(ActionRow.of(TextInput.create("amount", "Amount", TextInputStyle.SHORT).build())).build()).queue();
+        } else if (id.equals("claim_rakeback")) {
+            UserData ud = Database.getUserData(event.getUser().getId());
+            if (ud.rakeback < 0.01) {
+                event.reply("Error: You need at least 0.01M rakeback to claim.").setEphemeral(true).queue();
+                return;
+            }
+            double amount = ud.rakeback;
+            ud.balance += amount;
+            ud.rakeback = 0;
+            Database.saveUserData(event.getUser().getId(), ud);
+            event.reply("Successfully claimed " + String.format("%.2f", amount) + "M rakeback!").setEphemeral(true).queue();
+        } else if (id.equals("redeem_code")) {
+            event.replyModal(Modal.create("modal_redeem", "Redeem Code")
+                    .addActionRows(ActionRow.of(TextInput.create("promo_code", "Enter Code", TextInputStyle.SHORT).build())).build()).queue();
+        }
+    }
+
+    @Override
+    public void onModalInteraction(ModalInteractionEvent event) {
+        if (event.getModalId().startsWith("modal_admin_")) {
+            String[] p = event.getModalId().split("_");
+            try {
+                double amt = Double.parseDouble(event.getValue("amount").getAsString().toLowerCase().replace("m", "").trim());
+                UserData ud = Database.getUserData(p[3]);
+                if (p[2].equals("Credit")) {
+                    ud.balance += amt;
+                    ud.totalCredited += amt;
+                } else {
+                    ud.balance -= amt;
+                }
+                Database.saveUserData(p[3], ud);
+                event.reply("Wallet Updated! New Balance: " + String.format("%.2f", ud.balance) + "M").setEphemeral(true).queue();
+            } catch (Exception e) { event.reply("Error! Use numbers only.").setEphemeral(true).queue(); }
+        } else if (event.getModalId().equals("modal_redeem")) {
+            String code = event.getValue("promo_code").getAsString();
+            UserData ud = Database.getUserData(event.getUser().getId());
+            if (ud.hasRedeemed) { event.reply("Already redeemed!").setEphemeral(true).queue(); return; }
+            if (code.equalsIgnoreCase("free10")) {
+                ud.balance += 10.0; ud.hasRedeemed = true;
+                Database.saveUserData(event.getUser().getId(), ud);
+                event.reply("Success! 10M Welcome Bonus added.").setEphemeral(true).queue();
+            } else event.reply("Invalid code.").setEphemeral(true).queue();
+        }
+    }
+
+    private EmbedBuilder buildCleanEmbed(User u, UserData d) {
+        return new EmbedBuilder().setAuthor(u.getName() + "'s Wallet", null, u.getEffectiveAvatarUrl())
+                .setThumbnail(u.getEffectiveAvatarUrl())
+                .setColor(new Color(43, 45, 49))
+                .addField("💰 Balance", "```" + String.format("%.2fM", d.balance) + "```", true)
+                .addField("🎲 Wagered", "```" + String.format("%.2fM", d.wagered) + "```", true)
+                .addField("⭐ Rakeback", "```" + String.format("%.2fM", d.rakeback) + "```", true)
+                .setFooter("Manage your funds carefully").setTimestamp(Instant.now());
+    }
+
+    private EmbedBuilder buildAdminSecurityEmbed(Member m, UserData d) {
+        User u = m.getUser();
+        long age = ChronoUnit.DAYS.between(u.getTimeCreated(), OffsetDateTime.now());
+        return new EmbedBuilder().setAuthor(u.getName(), null, u.getEffectiveAvatarUrl())
+                .setThumbnail(u.getEffectiveAvatarUrl())
+                .setColor(age < 7 ? Color.RED : Color.GREEN)
+                .addField("💰 Balance", "```" + String.format("%.2fM", d.balance) + "```", true)
+                .addField("📥 Deposited", "```" + String.format("%.2fM", d.totalCredited) + "```", true)
+                .addField("🎲 Wagered", "```" + String.format("%.2fM", d.wagered) + "```", true)
+                .addField("👤 Age", age + " days", true)
+                .addField("🆔 ID", "```" + u.getId() + "```", false)
+                .setTimestamp(Instant.now());
+    }
+}
